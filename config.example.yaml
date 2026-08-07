@@ -1,0 +1,52 @@
+# Copy to ~/.codex-wechat/config.yaml  (Windows: %USERPROFILE%\.codex-wechat\config.yaml)
+#   npx tsx src/cli.ts init
+
+machine_name: macbook
+default_cwd: ~/code
+
+# allowed_roots:
+#   - ~/code
+#   - ~/projects
+
+# codex_bin: /usr/local/bin/codex
+
+# 微信远程默认只读；写文件/越权命令通过 /ok <host>:<code> 单次批准
+codex_sandbox_mode: read-only
+codex_approval_policy: on-request
+
+approval_timeout_sec: 300
+max_reply_chars: 3500
+# max_media_bytes: 26214400
+# max_attachment_count: 8
+# max_attachment_total_bytes: 52428800
+# inbox_max_bytes: 1073741824
+# http_request_timeout_ms: 15000
+# prompt_timeout_ms: 1800000
+# max_http_response_bytes: 67108864
+# bind_ttl_sec: 300
+# bind_max_fails: 5
+
+# ---------------------------------------------------------------------------
+# Multi-host (同一微信只在「入口机」扫码；其它机器跑 agent)
+# 不配 hosts → 单机模式（本地 Codex + 微信，与旧行为一致）
+# ---------------------------------------------------------------------------
+# default_host: local
+#
+# hosts:
+#   - id: local
+#     type: local
+#     label: mac-mini
+#   - id: vps
+#     type: http
+#     label: cloud-vps
+#     url: http://100.x.x.x:18765   # Tailscale / 内网 / SSH 隧道
+#     token: "<使用 codex-wechat agent-token 生成>"
+#     allow_insecure_http: true      # 仅可信内网明文 HTTP；优先 HTTPS/SSH 隧道
+#
+# Agent 侧（执行机，无微信）:
+# agent:
+#   host: 127.0.0.1        # 推荐 SSH 隧道；监听其它地址需显式开启下一项
+#   port: 18765
+#   token: "<使用 codex-wechat agent-token 生成>"
+#   allow_insecure_http: false
+#   max_body_bytes: 67108864

@@ -1,0 +1,33 @@
+[Unit]
+Description=codex-wechat (WeChat remote for Codex)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# IMPORTANT: must be the same user that ran `codex login`
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/apps/codex-wechat
+
+# If you use nvm, point to the node that has codex / this package
+Environment=PATH=/home/YOUR_USER/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin
+Environment=CODEX_WECHAT_MACHINE=vps
+# Environment=CODEX_WECHAT_CWD=/home/YOUR_USER/code
+# Environment=CODEX_WECHAT_CODEX_PATH=/home/YOUR_USER/.nvm/versions/node/v22.22.0/bin/codex
+# Optional: separate Codex profile/account on this host
+# Environment=CODEX_HOME=/home/YOUR_USER/.codex-vps
+
+ExecStart=/usr/bin/node /home/YOUR_USER/apps/codex-wechat/dist/src/cli.js start
+
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+# Hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

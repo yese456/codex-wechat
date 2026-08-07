@@ -1,0 +1,63 @@
+{
+  "name": "codex-wechat",
+  "version": "0.1.0",
+  "description": "Personal WeChat remote control for local/VPS Codex via iLink + app-server",
+  "type": "module",
+  "bin": {
+    "codex-wechat": "./bin/codex-wechat.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts",
+    "doctor": "tsx src/cli.ts doctor",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "probe-codex": "tsx scripts/probe-codex.ts",
+    "postinstall": "node scripts/patch-wechatbot.mjs",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run --json",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "smoke:tarball": "node scripts/smoke-tarball.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "codex",
+    "wechat",
+    "ilink",
+    "app-server",
+    "remote"
+  ],
+  "author": "ericheung",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yese456/codex-wechat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yese456/codex-wechat/issues"
+  },
+  "homepage": "https://github.com/yese456/codex-wechat#readme",
+  "files": [
+    "dist",
+    "bin",
+    "src",
+    "scripts/patch-wechatbot.mjs",
+    "config.example.yaml",
+    "deploy",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "dependencies": {
+    "@wechatbot/wechatbot": "2.2.0",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3"
+  }
+}
