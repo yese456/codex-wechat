@@ -5,6 +5,7 @@ import { MessageHandler } from "./handler.js";
 import { ApprovalBridge } from "./approvals.js";
 import { startWechatBot } from "./wechat/bot.js";
 import { HostRegistry } from "./hosts/registry.js";
+import { startCompletionWorker } from "./completions/worker.js";
 
 /** Gateway mode: WeChat entry + optional multi-host routing. */
 export async function runDaemon(): Promise<void> {
@@ -15,7 +16,7 @@ export async function runDaemon(): Promise<void> {
   console.log(`[codex-wechat] state=${config.statePath}`);
   console.log(`[codex-wechat] default_cwd=${config.defaultCwd}`);
   console.log(
-    `[codex-wechat] sandbox=${config.codexSandboxMode} approval=${config.codexApprovalPolicy}`,
+    `[codex-wechat] configured sandbox=${config.codexSandboxMode} approval=${config.codexApprovalPolicy}`,
   );
   if (config.defaultCwdIsFallback) {
     console.warn(
@@ -31,14 +32,22 @@ export async function runDaemon(): Promise<void> {
   }
 
   const state = new StateStore(config.statePath, config.defaultCwd);
-  if (!state.load().cwd) {
+  const startupState = state.load();
+  if (!startupState.cwd) {
     state.update({ cwd: config.defaultCwd });
   }
+  const sandboxMode =
+    startupState.codexSandboxMode ?? config.codexSandboxMode;
+  const approvalPolicy =
+    startupState.codexApprovalPolicy ?? config.codexApprovalPolicy;
+  console.log(
+    `[codex-wechat] effective sandbox=${sandboxMode} approval=${approvalPolicy}`,
+  );
 
   const codex = new CodexClient({
     command: config.codexBin,
-    sandboxMode: config.codexSandboxMode,
-    approvalPolicy: config.codexApprovalPolicy,
+    sandboxMode,
+    approvalPolicy,
   });
   console.log(`[codex-wechat] codex_bin=${codex.getCommand()}`);
 
@@ -71,6 +80,13 @@ export async function runDaemon(): Promise<void> {
     inboxMaxBytes: config.inboxMaxBytes,
   });
 
+  const completionWorker = startCompletionWorker({
+    config,
+    hosts: hosts.list(),
+    getUserId: () => state.load().allowUserId || null,
+    sendToUser: wechat.sendToUser,
+  });
+
   // Local approvals → WeChat (remote agents poll via HttpHost hooks)
   const localCodex = hosts.localCodexClient();
   const localHost = hosts.localHost();
@@ -80,19 +96,16 @@ export async function runDaemon(): Promise<void> {
           localCodex,
           config.approvalTimeoutSec,
           async (approval) => {
-            const userId = state.load().allowUserId || wechat.lastUserId;
+            const userId = state.load().allowUserId;
             if (!userId) {
               console.warn("有审批但尚无绑定用户:", approval.shortCode);
               return;
             }
-            const scopedCode = `${localHost.id}:${approval.shortCode}`;
             const body = [
-              `⏳ 需要审批  码: ${scopedCode}  (host=${localHost.id})`,
+              `⏳ 需要审批 (host=${localHost.id})`,
               approval.summary,
               "",
-              `同意: /ok ${scopedCode}`,
-              `拒绝: /no ${scopedCode}`,
-              `超时 ${config.approvalTimeoutSec}s 自动拒绝`,
+              `回复 /ok 同意，/no 拒绝（超时 ${config.approvalTimeoutSec}s 自动拒绝）`,
             ].join("\n");
             await wechat.sendToUser(userId, body);
           },
@@ -136,8 +149,12 @@ export async function runDaemon(): Promise<void> {
     `[codex-wechat] 当前 host=${hosts.current().id}  可用 /hosts /m 切换`,
   );
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`\n收到 ${signal}，正在退出…`);
+    await completionWorker.stop();
     approvals?.dispose();
     await codex.close().catch(() => {});
     try {

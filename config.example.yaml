@@ -1,6 +1,9 @@
 # Copy to ~/.codex-wechat/config.yaml  (Windows: %USERPROFILE%\.codex-wechat\config.yaml)
 #   npx tsx src/cli.ts init
 
+# 首次运行 codex-wechat 或执行 codex-wechat init 时会交互生成配置
+# Host / Gateway = 微信入口；Agent = 无微信执行机
+startup_mode: gateway
 machine_name: macbook
 default_cwd: ~/code
 
@@ -10,7 +13,8 @@ default_cwd: ~/code
 
 # codex_bin: /usr/local/bin/codex
 
-# 微信远程默认只读；写文件/越权命令通过 /ok <host>:<code> 单次批准
+# 微信远程默认只读；可用 /permissions 查询，/sandbox 和 /approval 动态切换
+# 降低保护级别需要在 60 秒内追加 confirm；写文件/越权命令可用 /ok 单次批准
 codex_sandbox_mode: read-only
 codex_approval_policy: on-request
 
@@ -26,6 +30,26 @@ max_reply_chars: 3500
 # bind_ttl_sec: 300
 # bind_max_fails: 5
 
+# Codex 完成主动通知。默认关闭；启用后还需在 ~/.codex/config.toml 配置：
+# notify = ["codex-wechat", "notify-dispatch"]
+# 源码运行可改为 node 与 dist/src/cli.js 的绝对路径。
+# notify-dispatch 只读取 CODEX_WECHAT_CONFIG 或 ~/.codex-wechat/config.yaml，
+# 不会执行项目目录中 config.yaml 配置的 callback。
+# 微信同步发起的 prompt 会写 suppression marker，避免同步回复后重复推送。
+# queue_path、delivery_path 必须互不相同，也不能与 state_path/config.yaml 相同。
+# completion_notifications:
+#   enabled: false
+#   queue_path: ~/.codex-wechat/completions/outbox.json
+#   delivery_path: ~/.codex-wechat/completions/delivery.json
+#   poll_interval_ms: 5000
+#   batch_size: 20
+#   request_summary_chars: 240
+#   result_summary_chars: 600
+#   ack_retention_days: 7
+#   callbacks:
+#     - argv: ["/absolute/path/to/existing-computer-use-notify"]
+#       timeout_ms: 10000
+
 # ---------------------------------------------------------------------------
 # Multi-host (同一微信只在「入口机」扫码；其它机器跑 agent)
 # 不配 hosts → 单机模式（本地 Codex + 微信，与旧行为一致）
@@ -36,12 +60,14 @@ max_reply_chars: 3500
 #   - id: local
 #     type: local
 #     label: mac-mini
+#     completion_notifications: true
 #   - id: vps
 #     type: http
 #     label: cloud-vps
 #     url: http://100.x.x.x:18765   # Tailscale / 内网 / SSH 隧道
 #     token: "<使用 codex-wechat agent-token 生成>"
 #     allow_insecure_http: true      # 仅可信内网明文 HTTP；优先 HTTPS/SSH 隧道
+#     completion_notifications: true # 未设置时继承顶层 enabled
 #
 # Agent 侧（执行机，无微信）:
 # agent:

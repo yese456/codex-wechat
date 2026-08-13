@@ -18,6 +18,10 @@ import type {
   CodexApprovalPolicy,
   CodexSandboxMode,
 } from "../config.js";
+import {
+  CODEX_APPROVAL_POLICIES,
+  CODEX_SANDBOX_MODES,
+} from "../config.js";
 
 export type CodexEvent =
   | { type: "approval"; approval: PendingApproval }
@@ -225,6 +229,27 @@ function summarizeApproval(
   return `【审批】${method}\n${clip(JSON.stringify(params), 400)}`;
 }
 
+export function formatTurnCompletionText(options: {
+  status?: string;
+  error?: string;
+  lastError?: string;
+  lastAgentText?: string;
+}): string {
+  const err = options.error || options.lastError || "";
+  const failedStatus =
+    typeof options.status === "string" &&
+    ["failed", "error", "cancelled", "canceled"].includes(
+      options.status.toLowerCase(),
+    );
+  if (err || failedStatus) {
+    return err
+      ? `❌ Codex 失败${options.status ? `（${options.status}）` : ""}:\n${err}`
+      : `❌ Codex 执行失败${options.status ? `（${options.status}）` : ""}（无详细错误信息）`;
+  }
+  if (options.lastAgentText?.trim()) return options.lastAgentText.trim();
+  return "(无文本回复)";
+}
+
 export class CodexClient {
   private client: JsonRpcClient;
   private state: "not_connected" | "connected" | "reconnecting" =
@@ -240,8 +265,8 @@ export class CodexClient {
   private initializePromise: Promise<unknown> | null = null;
   private maxReconnectAttempts = 8;
   private readonly command: string;
-  private readonly sandboxMode: CodexSandboxMode;
-  private readonly approvalPolicy: CodexApprovalPolicy;
+  private sandboxMode: CodexSandboxMode;
+  private approvalPolicy: CodexApprovalPolicy;
   onEvent: ((ev: CodexEvent) => void) | null = null;
 
   constructor(
@@ -259,6 +284,16 @@ export class CodexClient {
 
   getCommand(): string {
     return this.command;
+  }
+
+  getSecurityPolicy(): {
+    sandboxMode: CodexSandboxMode;
+    approvalPolicy: CodexApprovalPolicy;
+  } {
+    return {
+      sandboxMode: this.sandboxMode,
+      approvalPolicy: this.approvalPolicy,
+    };
   }
 
   getStatus(): {
@@ -578,12 +613,43 @@ export class CodexClient {
     await this.ensureConnected();
     const normalized = value.trim();
     if (!normalized) throw new Error(`${keyPath} 不能为空`);
+    await this.writeConfigValue(keyPath, normalized);
+    return this.getModelConfig();
+  }
+
+  async setSandboxMode(mode: CodexSandboxMode): Promise<{
+    sandboxMode: CodexSandboxMode;
+    approvalPolicy: CodexApprovalPolicy;
+  }> {
+    if (!CODEX_SANDBOX_MODES.includes(mode)) {
+      throw new Error(`sandbox 只能是: ${CODEX_SANDBOX_MODES.join(" | ")}`);
+    }
+    await this.writeConfigValue("sandbox_mode", mode);
+    this.sandboxMode = mode;
+    return this.getSecurityPolicy();
+  }
+
+  async setApprovalPolicy(policy: CodexApprovalPolicy): Promise<{
+    sandboxMode: CodexSandboxMode;
+    approvalPolicy: CodexApprovalPolicy;
+  }> {
+    if (!CODEX_APPROVAL_POLICIES.includes(policy)) {
+      throw new Error(
+        `approval 只能是: ${CODEX_APPROVAL_POLICIES.join(" | ")}`,
+      );
+    }
+    await this.writeConfigValue("approval_policy", policy);
+    this.approvalPolicy = policy;
+    return this.getSecurityPolicy();
+  }
+
+  private async writeConfigValue(keyPath: string, value: string): Promise<void> {
+    await this.ensureConnected();
     await this.client.request("config/value/write", {
       keyPath,
-      value: normalized,
+      value,
       mergeStrategy: "replace",
     });
-    return this.getModelConfig();
   }
 
   async listModels(): Promise<CodexModelInfo[]> {
@@ -718,24 +784,14 @@ export class CodexClient {
           }
         }
         if (ev.type === "turnCompleted" && ev.threadId === threadId) {
-          const err = ev.error || lastError;
-          if (lastAgentText.trim()) {
-            finish(() => resolve(lastAgentText.trim()));
-            return;
-          }
-          if (err) {
-            finish(() =>
-              resolve(
-                `❌ Codex 失败${ev.status ? `（${ev.status}）` : ""}:\n${err}`,
-              ),
-            );
-            return;
-          }
           finish(() =>
             resolve(
-              ev.status === "failed"
-                ? "❌ Codex 执行失败（无详细错误信息）"
-                : "(无文本回复)",
+              formatTurnCompletionText({
+                status: ev.status,
+                error: ev.error ?? undefined,
+                lastError,
+                lastAgentText,
+              }),
             ),
           );
         }

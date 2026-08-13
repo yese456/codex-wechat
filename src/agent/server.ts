@@ -1,8 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import type { AppConfig } from "../config.js";
+import type {
+  AppConfig,
+  CodexApprovalPolicy,
+  CodexSandboxMode,
+} from "../config.js";
 import {
+  CODEX_APPROVAL_POLICIES,
+  CODEX_SANDBOX_MODES,
   ensureDataDirs,
   isUnsafeToken,
   loadConfig,
@@ -10,10 +16,12 @@ import {
 import { StateStore } from "../state.js";
 import { CodexClient } from "../codex/client.js";
 import { LocalHost } from "../hosts/local-host.js";
+import { HostInputError } from "../hosts/types.js";
 import { ApprovalBridge } from "../approvals.js";
 import { saveAttachment } from "../media/save.js";
 import type { Attachment, AttachmentKind } from "../media/types.js";
 import { inboxRootForCwd } from "../media/save.js";
+import { CompletionStore } from "../completions/store.js";
 
 type WireAttachment = {
   kind?: string;
@@ -30,6 +38,47 @@ class HttpError extends Error {
   ) {
     super(message);
   }
+}
+
+export function agentRequestTimeout(promptTimeoutMs: number): number {
+  return Math.max(120_000, promptTimeoutMs + 60_000);
+}
+
+export function agentHttpStatusForError(error: unknown): number {
+  if (error instanceof HttpError) return error.status;
+  if (error instanceof HostInputError) return 400;
+  return 500;
+}
+
+export function validateCompletionLimit(
+  value: string | null,
+  defaultLimit: number,
+): number {
+  if (value === null) return defaultLimit;
+  if (!/^\d+$/.test(value)) {
+    throw new HttpError(400, "limit 必须是 1-100 的整数");
+  }
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new HttpError(400, "limit 必须是 1-100 的整数");
+  }
+  return limit;
+}
+
+export function validateCompletionAckIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new HttpError(400, "ids 必须是包含 1-100 项的 SHA-256 字符串数组");
+  }
+  if (
+    value.some(
+      (id) =>
+        typeof id !== "string" ||
+        !/^[0-9a-f]{64}$/i.test(id.trim()),
+    )
+  ) {
+    throw new HttpError(400, "ids 必须是包含 1-100 项的 SHA-256 字符串数组");
+  }
+  return [...new Set(value.map((id) => (id as string).trim().toLowerCase()))];
 }
 
 function isLoopback(host: string): boolean {
@@ -148,11 +197,19 @@ export async function runAgentServer(
   }
 
   const state = new StateStore(config.statePath, config.defaultCwd);
+  const startupState = state.load();
+  const sandboxMode =
+    startupState.codexSandboxMode ?? config.codexSandboxMode;
+  const approvalPolicy =
+    startupState.codexApprovalPolicy ?? config.codexApprovalPolicy;
   const codex = new CodexClient({
     command: config.codexBin,
-    sandboxMode: config.codexSandboxMode,
-    approvalPolicy: config.codexApprovalPolicy,
+    sandboxMode,
+    approvalPolicy,
   });
+  console.log(
+    `[agent] sandbox=${sandboxMode} approval=${approvalPolicy}`,
+  );
   try {
     await codex.initialize();
     console.log("[agent] app-server connected");
@@ -160,12 +217,18 @@ export async function runAgentServer(
     console.warn("[agent] app-server 暂未连上:", (err as Error).message);
   }
 
+  const completionStore = new CompletionStore(
+    config.completionNotifications.queuePath,
+    { ackRetentionDays: config.completionNotifications.ackRetentionDays },
+  );
   const local = new LocalHost(
     "agent",
     config.machineName,
     config,
     state,
     codex,
+    completionStore,
+    config.completionNotifications.enabled,
   );
 
   // Collect approvals for polling; optional log
@@ -203,7 +266,7 @@ export async function runAgentServer(
 
   const server = createServer(async (req, res) => {
     try {
-      const url = new URL(req.url || "/", `http://${hostBind}`);
+      const url = new URL(req.url || "/", "http://localhost");
       if (url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
         return;
@@ -233,6 +296,59 @@ export async function runAgentServer(
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         sendJson(res, 200, { models: await local.listModels() });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/v1/security") {
+        sendJson(res, 200, { policy: await local.getSecurityPolicy() });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/v1/security") {
+        const policy = await exclusive(async () => {
+          const body = await readJson<{
+            sandboxMode?: unknown;
+            approvalPolicy?: unknown;
+          }>(req, config.agentMaxBodyBytes);
+          const fields = Number(body.sandboxMode !== undefined) +
+            Number(body.approvalPolicy !== undefined);
+          if (fields !== 1) {
+            throw new HttpError(
+              400,
+              "必须且只能提供 sandboxMode 或 approvalPolicy 之一",
+            );
+          }
+          if (typeof body.sandboxMode === "string") {
+            if (
+              !CODEX_SANDBOX_MODES.includes(
+                body.sandboxMode as CodexSandboxMode,
+              )
+            ) {
+              throw new HttpError(
+                400,
+                `sandboxMode 只能是: ${CODEX_SANDBOX_MODES.join(" | ")}`,
+              );
+            }
+            return local.setSandboxMode(
+              body.sandboxMode as CodexSandboxMode,
+            );
+          }
+          if (typeof body.approvalPolicy === "string") {
+            if (
+              !CODEX_APPROVAL_POLICIES.includes(
+                body.approvalPolicy as CodexApprovalPolicy,
+              )
+            ) {
+              throw new HttpError(
+                400,
+                `approvalPolicy 只能是: ${CODEX_APPROVAL_POLICIES.join(" | ")}`,
+              );
+            }
+            return local.setApprovalPolicy(
+              body.approvalPolicy as CodexApprovalPolicy,
+            );
+          }
+          throw new HttpError(400, "策略值必须是字符串");
+        });
+        sendJson(res, 200, { policy });
         return;
       }
       if (req.method === "POST" && url.pathname === "/v1/config/write") {
@@ -273,6 +389,24 @@ export async function runAgentServer(
         sendJson(res, 200, { text });
         return;
       }
+      if (req.method === "GET" && url.pathname === "/v1/projects") {
+        sendJson(res, 200, { projects: await local.listProjects() });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/v1/project") {
+        const text = await exclusive(async () => {
+          const body = await readJson<{ selector?: string }>(
+            req,
+            config.agentMaxBodyBytes,
+          );
+          if (typeof body.selector !== "string" || !body.selector.trim()) {
+            throw new HttpError(400, "selector 必须是非空字符串");
+          }
+          return local.selectProject(body.selector);
+        });
+        sendJson(res, 200, { text });
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/v1/sessions") {
         sendJson(res, 200, { text: await local.listSessions() });
         return;
@@ -303,6 +437,24 @@ export async function runAgentServer(
           return local.useSession(body.arg);
         });
         sendJson(res, 200, { text });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/v1/completions") {
+        const limit = validateCompletionLimit(
+          url.searchParams.get("limit"),
+          config.completionNotifications.batchSize,
+        );
+        sendJson(res, 200, { events: await local.pollCompletions(limit) });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/v1/completions/ack") {
+        const body = await readJson<{ ids?: unknown }>(
+          req,
+          config.agentMaxBodyBytes,
+        );
+        const ids = validateCompletionAckIds(body.ids);
+        await local.ackCompletions(ids);
+        sendJson(res, 200, { ok: true });
         return;
       }
       if (req.method === "GET" && url.pathname === "/v1/approvals") {
@@ -377,7 +529,7 @@ export async function runAgentServer(
 
       sendJson(res, 404, { error: "not found" });
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = agentHttpStatusForError(err);
       if (status >= 500) console.error("[agent] request failed:", err);
       if (!res.headersSent) sendJson(res, status, { error: (err as Error).message });
     }
@@ -392,7 +544,10 @@ export async function runAgentServer(
     );
   });
   server.headersTimeout = 15_000;
-  server.requestTimeout = 120_000;
+  // /v1/prompt holds the response open until the Codex turn completes.
+  // Keep the server timeout beyond the gateway's prompt timeout so the
+  // gateway remains the single lifecycle owner for long-running turns.
+  server.requestTimeout = agentRequestTimeout(config.promptTimeoutMs);
 
   const shutdown = async () => {
     approvalBridge.dispose();

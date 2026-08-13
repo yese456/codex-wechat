@@ -37,6 +37,9 @@ When upgrading Codex CLI, verify model operations against a real
   `mergeStrategy` is omitted.
 - Perform the write smoke test by writing the current values back, then read
   them again and assert they are unchanged.
+- Repeat that same-value write smoke for `sandbox_mode` and `approval_policy`.
+  Dynamic WeChat policy changes must update Codex global config, the current
+  client override, and restart-persistent codex-wechat state.
 - Regenerate the experimental app-server schema and verify `thread/start` and
   `thread/resume` still accept `sandbox: "read-only"` plus
   `approvalPolicy: "on-request"`. Verify
@@ -44,6 +47,15 @@ When upgrading Codex CLI, verify model operations against a real
   `permissions` with `scope: "turn"`, not a generic decision string.
 
 Run `npm test`, `npm run typecheck`, and `npm run build` after the probe.
+
+## Agent HTTP invariants
+
+- `/v1/prompt` is a blocking long-poll response. Keep Node's
+  `server.requestTimeout` at least 60 seconds beyond `promptTimeoutMs`; the
+  gateway fetch timeout owns the prompt lifecycle.
+- Keep `headersTimeout` short to limit slow-header connections.
+- Map user input validation (unknown model/effort/policy) to HTTP 400, while
+  app-server connectivity and internal failures remain HTTP 500.
 
 ## Pull requests
 

@@ -13,6 +13,18 @@ function configWith(yaml: string) {
 }
 
 describe("loadConfig validation", () => {
+  it("defaults startup mode to gateway and accepts agent", () => {
+    assert.equal(configWith("default_cwd: ~/code\n")().startupMode, "gateway");
+    assert.equal(
+      configWith("startup_mode: agent\ndefault_cwd: ~/code\n")().startupMode,
+      "agent",
+    );
+    assert.throws(
+      configWith("startup_mode: host\ndefault_cwd: ~/code\n"),
+      /startup_mode 只能是/,
+    );
+  });
+
   it("defaults WeChat-driven Codex to read-only with on-request approval", () => {
     const config = configWith("default_cwd: ~/code\n")();
     assert.equal(config.codexSandboxMode, "read-only");
@@ -48,6 +60,21 @@ describe("loadConfig validation", () => {
     assert.throws(
       configWith("default_cwd: ~/code\nagent:\n  token: change-me\n"),
       /agent\.token/,
+    );
+  });
+
+  it("rejects conflicting completion persistence paths", () => {
+    assert.throws(
+      configWith(
+        "default_cwd: ~/code\ncompletion_notifications:\n  queue_path: ~/.codex-wechat/same.json\n  delivery_path: ~/.codex-wechat/same.json\n",
+      ),
+      /queue_path 与 delivery_path 不能相同/,
+    );
+    assert.throws(
+      configWith(
+        "default_cwd: ~/code\nstate_path: ~/.codex-wechat/state.json\ncompletion_notifications:\n  queue_path: ~/.codex-wechat/state.json\n",
+      ),
+      /不能与 state_path 或 config 文件相同/,
     );
   });
 

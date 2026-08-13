@@ -30,4 +30,18 @@ describe("StateStore.bind", () => {
     const { code } = store.issueBindCode();
     assert.ok(code.length >= 32);
   });
+
+  it("persists dynamic Codex sandbox and approval overrides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cw-state-"));
+    const path = join(dir, "state.json");
+    const store = new StateStore(path, dir);
+    store.update({
+      codexSandboxMode: "workspace-write",
+      codexApprovalPolicy: "untrusted",
+    });
+
+    const reloaded = new StateStore(path, dir).load();
+    assert.equal(reloaded.codexSandboxMode, "workspace-write");
+    assert.equal(reloaded.codexApprovalPolicy, "untrusted");
+  });
 });

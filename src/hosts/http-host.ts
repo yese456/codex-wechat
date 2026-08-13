@@ -1,7 +1,17 @@
 import { readFileSync, statSync } from "node:fs";
-import { isUnsafeToken } from "../config.js";
+import {
+  isUnsafeToken,
+  type CodexApprovalPolicy,
+  type CodexSandboxMode,
+} from "../config.js";
 import type { Attachment } from "../media/types.js";
-import type { CodexHost, PendingApprovalView } from "./types.js";
+import type { CompletionEvent } from "../completions/types.js";
+import type {
+  CodexHost,
+  PendingApprovalView,
+  ProjectInfo,
+  SecurityPolicySnapshot,
+} from "./types.js";
 import type { CodexModelInfo, ModelConfigSnapshot } from "../models.js";
 
 export type HttpHostConfig = {
@@ -16,6 +26,7 @@ export type HttpHostConfig = {
   maxMediaBytes: number;
   maxAttachmentCount: number;
   maxAttachmentTotalBytes: number;
+  completionNotificationsEnabled: boolean;
 };
 
 function isLoopbackHost(hostname: string): boolean {
@@ -53,6 +64,7 @@ export class HttpHost implements CodexHost {
   readonly kind = "http" as const;
   readonly id: string;
   readonly label: string;
+  readonly completionNotificationsEnabled: boolean;
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly requestTimeoutMs: number;
@@ -92,6 +104,7 @@ export class HttpHost implements CodexHost {
     this.maxMediaBytes = cfg.maxMediaBytes;
     this.maxAttachmentCount = cfg.maxAttachmentCount;
     this.maxAttachmentTotalBytes = cfg.maxAttachmentTotalBytes;
+    this.completionNotificationsEnabled = cfg.completionNotificationsEnabled;
   }
 
   private async api<T>(
@@ -194,6 +207,36 @@ export class HttpHost implements CodexHost {
     return r.config;
   }
 
+  async getSecurityPolicy(): Promise<SecurityPolicySnapshot> {
+    const r = await this.api<{ policy: SecurityPolicySnapshot }>(
+      "GET",
+      "/v1/security",
+    );
+    return r.policy;
+  }
+
+  async setSandboxMode(
+    mode: CodexSandboxMode,
+  ): Promise<SecurityPolicySnapshot> {
+    const r = await this.api<{ policy: SecurityPolicySnapshot }>(
+      "POST",
+      "/v1/security",
+      { sandboxMode: mode },
+    );
+    return r.policy;
+  }
+
+  async setApprovalPolicy(
+    policy: CodexApprovalPolicy,
+  ): Promise<SecurityPolicySnapshot> {
+    const r = await this.api<{ policy: SecurityPolicySnapshot }>(
+      "POST",
+      "/v1/security",
+      { approvalPolicy: policy },
+    );
+    return r.policy;
+  }
+
   async getCwd(): Promise<string> {
     const r = await this.api<{ cwd: string }>("GET", "/v1/cwd");
     return r.cwd;
@@ -204,10 +247,22 @@ export class HttpHost implements CodexHost {
     return r.text;
   }
 
-  async newThread(title?: string): Promise<string> {
-    const r = await this.api<{ text: string }>("POST", "/v1/sessions/new", {
-      title: title ?? null,
+  async listProjects(): Promise<ProjectInfo[]> {
+    const r = await this.api<{ projects: ProjectInfo[] }>("GET", "/v1/projects");
+    return r.projects;
+  }
+
+  async selectProject(selector: string): Promise<string> {
+    const r = await this.api<{ text: string }>("POST", "/v1/project", {
+      selector,
     });
+    return r.text;
+  }
+
+  async newThread(title?: string): Promise<string> {
+    const body: Record<string, string> = {};
+    if (title) body.title = title;
+    const r = await this.api<{ text: string }>("POST", "/v1/sessions/new", body);
     return r.text;
   }
 
@@ -291,6 +346,16 @@ export class HttpHost implements CodexHost {
     return r.text;
   }
 
+  async listPendingApprovals(): Promise<PendingApprovalView[]> {
+    const r = await this.api<{ items: PendingApprovalView[] }>(
+      "GET",
+      "/v1/approvals",
+      undefined,
+      5_000,
+    );
+    return r.items ?? [];
+  }
+
   async resolveApproval(
     code: string,
     decision: "accept" | "decline",
@@ -300,6 +365,18 @@ export class HttpHost implements CodexHost {
       decision,
     });
     return r.text;
+  }
+
+  async ackCompletions(ids: string[]): Promise<void> {
+    await this.api<{ ok: true }>("POST", "/v1/completions/ack", { ids });
+  }
+
+  async pollCompletions(limit: number): Promise<CompletionEvent[]> {
+    const r = await this.api<{ events: CompletionEvent[] }>(
+      "GET",
+      `/v1/completions?limit=${encodeURIComponent(String(limit))}`,
+    );
+    return r.events ?? [];
   }
 
   async getFile(

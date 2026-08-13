@@ -1,6 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  writeFileSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isUnderDir, resolveUnderRoot } from "../src/path-safety.js";
@@ -55,6 +61,12 @@ describe("resolveDefaultCwd", () => {
     assert.equal(isFallback, true);
     assert.notEqual(cwd, home);
     assert.ok(cwd.endsWith("code") || cwd.includes(`${home}/code`) || cwd.includes(`${home}\\code`));
+  });
+
+  it("rejects a fallback ~/code symlink to the full home", () => {
+    const home = mkdtempSync(join(tmpdir(), "cw-home-link-"));
+    symlinkSync(home, join(home, "code"), "dir");
+    assert.throws(() => resolveDefaultCwd(home, undefined), /符号链接/);
   });
 
   it("honors explicit cwd", () => {
@@ -113,6 +125,6 @@ describe("resolveCwd", () => {
       defaultCwd: root,
       allowedRoots: [root],
     } as AppConfig;
-    assert.equal(resolveCwd(link, config), target);
+    assert.equal(resolveCwd(link, config), realpathSync(target));
   });
 });

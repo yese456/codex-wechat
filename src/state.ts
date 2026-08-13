@@ -12,7 +12,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  CODEX_APPROVAL_POLICIES,
+  CODEX_SANDBOX_MODES,
+  type CodexApprovalPolicy,
+  type CodexSandboxMode,
+} from "./config.js";
 
 export type AppState = {
   version: 1;
@@ -28,6 +34,9 @@ export type AppState = {
   threadPreview: string | null;
   /** Gateway multi-host: current host id (local / vps / …). */
   currentHostId: string | null;
+  /** Runtime overrides changed from WeChat; null means config.yaml/env default. */
+  codexSandboxMode: CodexSandboxMode | null;
+  codexApprovalPolicy: CodexApprovalPolicy | null;
   updatedAt: string;
 };
 
@@ -40,6 +49,8 @@ const DEFAULT: Omit<AppState, "cwd"> & { cwd?: string } = {
   threadId: null,
   threadPreview: null,
   currentHostId: null,
+  codexSandboxMode: null,
+  codexApprovalPolicy: null,
   updatedAt: new Date(0).toISOString(),
 };
 
@@ -76,6 +87,18 @@ export class StateStore {
           typeof raw.threadPreview === "string" ? raw.threadPreview : null,
         currentHostId:
           typeof raw.currentHostId === "string" ? raw.currentHostId : null,
+        codexSandboxMode:
+          typeof raw.codexSandboxMode === "string" &&
+          CODEX_SANDBOX_MODES.includes(raw.codexSandboxMode as CodexSandboxMode)
+            ? (raw.codexSandboxMode as CodexSandboxMode)
+            : null,
+        codexApprovalPolicy:
+          typeof raw.codexApprovalPolicy === "string" &&
+          CODEX_APPROVAL_POLICIES.includes(
+            raw.codexApprovalPolicy as CodexApprovalPolicy,
+          )
+            ? (raw.codexApprovalPolicy as CodexApprovalPolicy)
+            : null,
         updatedAt:
           typeof raw.updatedAt === "string"
             ? raw.updatedAt
@@ -175,7 +198,17 @@ export class StateStore {
         });
         return { ok: false, reason: "绑定码已过期。请在本机重新运行: codex-wechat bind" };
       }
-      if (code.trim().toLowerCase() !== state.pendingBindCode.toLowerCase()) {
+      const expectedCode = Buffer.from(
+        state.pendingBindCode.toLowerCase(),
+        "utf8",
+      );
+      const suppliedCode = Buffer.from(code.trim().toLowerCase(), "utf8");
+      const comparableCode = Buffer.alloc(expectedCode.length);
+      suppliedCode.copy(comparableCode, 0, 0, expectedCode.length);
+      const codeMatches =
+        suppliedCode.length === expectedCode.length &&
+        timingSafeEqual(comparableCode, expectedCode);
+      if (!codeMatches) {
         const fails = (state.pendingBindFailCount || 0) + 1;
         if (fails >= maxFails) {
           this.saveUnlocked({

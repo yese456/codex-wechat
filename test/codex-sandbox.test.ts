@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CodexClient, approvalResultFor } from "../src/codex/client.js";
+import {
+  CodexClient,
+  approvalResultFor,
+  formatTurnCompletionText,
+} from "../src/codex/client.js";
 
 describe("Codex sandbox and approval policy", () => {
   it("enforces read-only/on-request when starting and resuming threads", async () => {
@@ -53,6 +57,23 @@ describe("Codex sandbox and approval policy", () => {
     assert.equal(requests[2]?.params.approvalsReviewer, "user");
   });
 
+  it("reports a failed turn before any partial assistant text", () => {
+    assert.equal(
+      formatTurnCompletionText({
+        status: "failed",
+        lastAgentText: "partial answer",
+      }),
+      "❌ Codex 执行失败（failed）（无详细错误信息）",
+    );
+    assert.equal(
+      formatTurnCompletionText({
+        status: "completed",
+        lastAgentText: "final answer",
+      }),
+      "final answer",
+    );
+  });
+
   it("grants only the requested permission profile for the current turn", () => {
     const requested = {
       fileSystem: {
@@ -77,5 +98,56 @@ describe("Codex sandbox and approval policy", () => {
       ),
       { permissions: {}, scope: "turn" },
     );
+  });
+
+  it("writes dynamic policy globally and reapplies it to the next thread resume", async () => {
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const codex = new CodexClient({ command: "codex" });
+    codex.ensureConnected = async () => {};
+    (codex as unknown as {
+      client: {
+        request: (
+          method: string,
+          params: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    }).client = {
+      request: async (method, params) => {
+        requests.push({ method, params });
+        return {};
+      },
+    };
+
+    await codex.setSandboxMode("workspace-write");
+    await codex.setApprovalPolicy("never");
+    await codex.resumeThread("thread-1", "/work");
+
+    assert.deepEqual(requests[0], {
+      method: "config/value/write",
+      params: {
+        keyPath: "sandbox_mode",
+        value: "workspace-write",
+        mergeStrategy: "replace",
+      },
+    });
+    assert.deepEqual(requests[1], {
+      method: "config/value/write",
+      params: {
+        keyPath: "approval_policy",
+        value: "never",
+        mergeStrategy: "replace",
+      },
+    });
+    assert.deepEqual(requests[2]?.params, {
+      threadId: "thread-1",
+      cwd: "/work",
+      sandbox: "workspace-write",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+    });
+    assert.deepEqual(codex.getSecurityPolicy(), {
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+    });
   });
 });

@@ -4,16 +4,22 @@ import type { CodexClient } from "../codex/client.js";
 import type { CodexHost } from "./types.js";
 import { LocalHost } from "./local-host.js";
 import { HttpHost } from "./http-host.js";
+import { CompletionStore } from "../completions/store.js";
 
 export class HostRegistry {
   private hosts = new Map<string, CodexHost>();
   private order: string[] = [];
+  private readonly completionStore: CompletionStore;
 
   constructor(
     private readonly config: AppConfig,
     private readonly state: StateStore,
     private readonly localCodex: CodexClient,
   ) {
+    this.completionStore = new CompletionStore(
+      config.completionNotifications.queuePath,
+      { ackRetentionDays: config.completionNotifications.ackRetentionDays },
+    );
     this.rebuild();
   }
 
@@ -30,6 +36,8 @@ export class HostRegistry {
         this.config,
         this.state,
         this.localCodex,
+        this.completionStore,
+        this.config.completionNotifications.enabled,
       );
       this.hosts.set("local", local);
       this.order.push("local");
@@ -51,6 +59,8 @@ export class HostRegistry {
         this.config,
         this.state,
         this.localCodex,
+        this.completionStore,
+        e.completionNotifications ?? this.config.completionNotifications.enabled,
       );
     }
     if (e.type === "http") {
@@ -69,6 +79,8 @@ export class HostRegistry {
         maxMediaBytes: this.config.maxMediaBytes,
         maxAttachmentCount: this.config.maxAttachmentCount,
         maxAttachmentTotalBytes: this.config.maxAttachmentTotalBytes,
+        completionNotificationsEnabled:
+          e.completionNotifications ?? this.config.completionNotifications.enabled,
       });
     }
     throw new Error(`host ${e.id}: unknown type`);

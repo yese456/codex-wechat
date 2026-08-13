@@ -6,7 +6,8 @@ import {
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import type { CompletionNotificationsConfig } from "./completions/types.js";
 import { parse as parseYaml } from "yaml";
 import {
   canonicalDirectoryUnderRoots,
@@ -23,15 +24,28 @@ export type HostConfigEntry = {
   token?: string;
   /** Required for plaintext HTTP to a non-loopback address. */
   allowInsecureHttp?: boolean;
+  completionNotifications?: boolean;
 };
 
-export type CodexSandboxMode =
-  | "read-only"
-  | "workspace-write"
-  | "danger-full-access";
-export type CodexApprovalPolicy = "untrusted" | "on-request" | "never";
+export const STARTUP_MODES = ["gateway", "agent"] as const;
+export type StartupMode = (typeof STARTUP_MODES)[number];
+
+export const CODEX_SANDBOX_MODES = [
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+] as const;
+export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
+
+export const CODEX_APPROVAL_POLICIES = [
+  "untrusted",
+  "on-request",
+  "never",
+] as const;
+export type CodexApprovalPolicy = (typeof CODEX_APPROVAL_POLICIES)[number];
 
 export type AppConfig = {
+  startupMode: StartupMode;
   machineName: string;
   defaultCwd: string;
   /** True when default_cwd fell back to ~/code (not user-configured). */
@@ -66,9 +80,11 @@ export type AppConfig = {
   httpRequestTimeoutMs: number;
   promptTimeoutMs: number;
   maxHttpResponseBytes: number;
+  completionNotifications: CompletionNotificationsConfig;
 };
 
 type RawConfig = {
+  startup_mode?: string;
   machine_name?: string;
   default_cwd?: string;
   allowed_roots?: string[];
@@ -93,7 +109,22 @@ type RawConfig = {
     url?: string;
     token?: string;
     allow_insecure_http?: boolean;
+    completion_notifications?: boolean;
   }>;
+  completion_notifications?: {
+    enabled?: boolean;
+    queue_path?: string;
+    delivery_path?: string;
+    poll_interval_ms?: number;
+    batch_size?: number;
+    request_summary_chars?: number;
+    result_summary_chars?: number;
+    ack_retention_days?: number;
+    callbacks?: Array<{
+      argv?: string[];
+      timeout_ms?: number;
+    }>;
+  };
   agent?: {
     host?: string;
     port?: number;
@@ -212,7 +243,14 @@ export function resolveDefaultCwd(
   }
   const cwd = resolve(join(home, "code"));
   mkdirSync(cwd, { recursive: true });
-  return { cwd, isFallback: true };
+  const canonicalCwd = realpathSync(cwd);
+  const canonicalHome = existsSync(home) ? realpathSync(home) : resolve(home);
+  if (canonicalCwd === canonicalHome || canonicalCwd === resolve("/")) {
+    throw new Error(
+      "默认 ~/code 不能通过符号链接指向 $HOME 或文件系统根目录；请修复链接或显式配置 default_cwd",
+    );
+  }
+  return { cwd: canonicalCwd, isFallback: true };
 }
 
 export function loadConfig(opts: { home?: string; configPath?: string | null } = {}): AppConfig {
@@ -221,6 +259,12 @@ export function loadConfig(opts: { home?: string; configPath?: string | null } =
     opts.configPath === undefined ? resolveConfigPath(home) : opts.configPath;
   const raw = loadRaw(configPath);
   const dataDir = defaultDataDir(home);
+  const startupMode = enumValue<StartupMode>(
+    "startup_mode",
+    raw.startup_mode,
+    STARTUP_MODES,
+    "gateway",
+  );
 
   const machineName =
     process.env.CODEX_WECHAT_MACHINE?.trim() ||
@@ -262,14 +306,14 @@ export function loadConfig(opts: { home?: string; configPath?: string | null } =
   const codexSandboxMode = enumValue<CodexSandboxMode>(
     "codex_sandbox_mode",
     process.env.CODEX_WECHAT_CODEX_SANDBOX ?? raw.codex_sandbox_mode,
-    ["read-only", "workspace-write", "danger-full-access"],
+    CODEX_SANDBOX_MODES,
     "read-only",
   );
   const codexApprovalPolicy = enumValue<CodexApprovalPolicy>(
     "codex_approval_policy",
     process.env.CODEX_WECHAT_CODEX_APPROVAL_POLICY ??
       raw.codex_approval_policy,
-    ["untrusted", "on-request", "never"],
+    CODEX_APPROVAL_POLICIES,
     "on-request",
   );
 
@@ -385,6 +429,13 @@ export function loadConfig(opts: { home?: string; configPath?: string | null } =
         `hosts.${id}.allow_insecure_http`,
         h.allow_insecure_http,
       ),
+      completionNotifications:
+        h.completion_notifications === undefined
+          ? undefined
+          : booleanValue(
+              `hosts.${id}.completion_notifications`,
+              h.completion_notifications,
+            ),
     });
   }
 
@@ -457,7 +508,122 @@ export function loadConfig(opts: { home?: string; configPath?: string | null } =
     3 * 1024 * 1024 * 1024,
   );
 
+  if (
+    raw.completion_notifications !== undefined &&
+    (!raw.completion_notifications ||
+      typeof raw.completion_notifications !== "object" ||
+      Array.isArray(raw.completion_notifications))
+  ) {
+    throw new Error("配置 completion_notifications 必须是对象");
+  }
+  const rawCompletions = raw.completion_notifications;
+  if (rawCompletions?.callbacks !== undefined && !Array.isArray(rawCompletions.callbacks)) {
+    throw new Error("配置 completion_notifications.callbacks 必须是数组");
+  }
+  const callbacks = (rawCompletions?.callbacks ?? []).map((callback, index) => {
+    if (!callback || typeof callback !== "object" || Array.isArray(callback)) {
+      throw new Error(`配置 completion_notifications.callbacks.${index} 必须是对象`);
+    }
+    if (!Array.isArray(callback.argv) || callback.argv.length === 0) {
+      throw new Error(`配置 completion_notifications.callbacks.${index}.argv 必须是非空数组`);
+    }
+    if (callback.argv.some((arg) => typeof arg !== "string" || !arg)) {
+      throw new Error(`配置 completion_notifications.callbacks.${index}.argv 每项必须是非空字符串`);
+    }
+    return {
+      argv: [...callback.argv],
+      timeoutMs: positiveInteger(
+        `completion_notifications.callbacks.${index}.timeout_ms`,
+        callback.timeout_ms,
+        10_000,
+        100,
+        120_000,
+      ),
+    };
+  });
+  const completionNotifications: CompletionNotificationsConfig = {
+    enabled: booleanValue(
+      "completion_notifications.enabled",
+      rawCompletions?.enabled,
+      false,
+    ),
+    queuePath: resolve(
+      expandHome(
+        optionalString(
+          "completion_notifications.queue_path",
+          rawCompletions?.queue_path,
+        ) ?? join(dataDir, "completions", "outbox.json"),
+        home,
+      ),
+    ),
+    deliveryPath: resolve(
+      expandHome(
+        optionalString(
+          "completion_notifications.delivery_path",
+          rawCompletions?.delivery_path,
+        ) ?? join(dataDir, "completions", "delivery.json"),
+        home,
+      ),
+    ),
+    pollIntervalMs: positiveInteger(
+      "completion_notifications.poll_interval_ms",
+      rawCompletions?.poll_interval_ms,
+      5_000,
+      500,
+      300_000,
+    ),
+    batchSize: positiveInteger(
+      "completion_notifications.batch_size",
+      rawCompletions?.batch_size,
+      20,
+      1,
+      100,
+    ),
+    requestSummaryChars: positiveInteger(
+      "completion_notifications.request_summary_chars",
+      rawCompletions?.request_summary_chars,
+      240,
+      20,
+      4_000,
+    ),
+    resultSummaryChars: positiveInteger(
+      "completion_notifications.result_summary_chars",
+      rawCompletions?.result_summary_chars,
+      600,
+      20,
+      8_000,
+    ),
+    ackRetentionDays: positiveInteger(
+      "completion_notifications.ack_retention_days",
+      rawCompletions?.ack_retention_days,
+      7,
+      1,
+      365,
+    ),
+    callbacks,
+  };
+
+  if (completionNotifications.queuePath === completionNotifications.deliveryPath) {
+    throw new Error(
+      "completion_notifications.queue_path 与 delivery_path 不能相同",
+    );
+  }
+  const reservedPaths = [statePath, configPath].filter(
+    (path): path is string => typeof path === "string" && path.length > 0,
+  );
+  for (const reservedPath of reservedPaths) {
+    if (
+      completionNotifications.queuePath === reservedPath ||
+      completionNotifications.deliveryPath === reservedPath
+    ) {
+      throw new Error(
+        "completion_notifications 的 queue_path/delivery_path 不能与 state_path 或 config 文件相同",
+      );
+    }
+  }
+
   return {
+    startupMode,
     machineName,
     defaultCwd,
     defaultCwdIsFallback,
@@ -487,6 +653,7 @@ export function loadConfig(opts: { home?: string; configPath?: string | null } =
     httpRequestTimeoutMs,
     promptTimeoutMs,
     maxHttpResponseBytes,
+    completionNotifications,
   };
 }
 
@@ -495,6 +662,8 @@ export function ensureDataDirs(config: AppConfig): void {
     defaultDataDir(config.homeDir),
     config.wechatStorageDir,
     join(config.statePath, ".."),
+    dirname(config.completionNotifications.queuePath),
+    dirname(config.completionNotifications.deliveryPath),
   ];
   for (const dir of secureDirs) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });

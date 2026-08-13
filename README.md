@@ -82,14 +82,16 @@ cd codex-wechat
 npm install
 npm run typecheck
 
-# optional config
-npx tsx src/cli.ts init
-# edit ~/.codex-wechat/config.yaml
-
-# terminal 1 — daemon (prints QR URL on first login)
+# 首次运行会进入交互向导：
+# 1) Host / Gateway 或 Agent
+# 2) 默认项目路径
+# 3) Codex 沙箱权限
 npm start
 
-# terminal 2 — bind code
+# 也可提前配置；重新配置使用 init --force
+npx tsx src/cli.ts init
+
+# Gateway 首次启动会打印微信二维码；另开终端生成绑定码
 npx tsx src/cli.ts bind
 # in WeChat: /bind <code>
 ```
@@ -99,6 +101,8 @@ Then:
 ```text
 /help
 /status
+/projects
+/project 1
 /cwd ~/code/my-app
 /new fix the flaky test
 /sessions
@@ -120,6 +124,8 @@ Approvals look like:
 | `/status` | Machine, cwd, thread, Codex status |
 | `/bind <code>` | Bind this WeChat user |
 | `/cwd [path]` | Show or change working directory |
+| `/projects` | List first-level projects under `allowed_roots` |
+| `/project <n\|name\|id>` | Switch project by sequence, unique name, or short ID |
 | `/new [prompt]` | New thread (optional first message) |
 | `/sessions` | List recent threads |
 | `/use <n\|id>` | Switch thread |
@@ -131,6 +137,9 @@ Approvals look like:
 | `/model <id>` | Switch the current host's machine-wide Codex model |
 | `/think <level>` | Switch reasoning effort after validating it against the current model |
 | `/models` | List available models and each model's supported reasoning efforts |
+| `/permissions` | Show the current host's sandbox and approval policy |
+| `/sandbox [mode]` | Show or switch the current host's machine-wide sandbox mode |
+| `/approval [policy]` | Show or switch the current host's machine-wide approval policy |
 | `/hosts` | List execution hosts |
 | `/m <id>` | Switch host (`/m local`, `/m vps`) |
 | plain text | Sent to the **current** host’s Codex |
@@ -156,6 +165,86 @@ machine. Model IDs are validated with `model/list`; `/think` only accepts an
 effort reported by the selected model. If a newly selected model does not
 support the previous effort, codex-wechat switches it to that model's default
 effort (or its first supported effort).
+
+### Sandbox and approval switching
+
+Security policy commands also act on the host selected by `/m`:
+
+```text
+/permissions
+/sandbox read-only
+/sandbox workspace-write
+/sandbox danger-full-access
+/approval untrusted
+/approval on-request
+/approval never
+```
+
+Supported sandbox modes are `read-only`, `workspace-write`, and
+`danger-full-access`. Supported approval policies are `untrusted`,
+`on-request`, and `never`. The selected values are written to that machine's
+Codex global config, applied to the next turn (including resumed threads), and
+stored as a codex-wechat runtime override so they survive service restarts.
+
+Any change that reduces protection requires a second command within 60
+seconds, for example:
+
+```text
+/sandbox workspace-write
+/sandbox workspace-write confirm
+```
+
+Switching back to a more restrictive value applies immediately. Treat
+`danger-full-access` or `never` as high risk, especially when the service runs
+as root.
+
+### Codex task completion notifications
+
+Codex can call codex-wechat after an `agent-turn-complete` event so a task
+started outside WeChat still produces a WeChat completion message. Enable the
+persistent outbox on the Agent/local Codex machine:
+
+```yaml
+# ~/.codex-wechat/config.yaml
+completion_notifications:
+  enabled: true
+  queue_path: ~/.codex-wechat/completions/outbox.json
+  delivery_path: ~/.codex-wechat/completions/delivery.json
+  poll_interval_ms: 5000
+  batch_size: 20
+  callbacks:
+    # Optional: preserve an existing Computer Use notify callback.
+    - argv: ["/absolute/path/to/existing-computer-use-notify"]
+      timeout_ms: 10000
+```
+
+Then point Codex's global notify command at the installed CLI in
+`~/.codex/config.toml`:
+
+```toml
+notify = ["codex-wechat", "notify-dispatch"]
+```
+
+For a source checkout without a globally installed CLI, use absolute paths:
+
+```toml
+notify = ["/absolute/path/to/node", "/absolute/path/to/codex-wechat/dist/src/cli.js", "notify-dispatch"]
+```
+
+The dispatcher deliberately loads only `CODEX_WECHAT_CONFIG` (when explicitly
+set) or `~/.codex-wechat/config.yaml`; it never trusts a repository-local
+`config.yaml` for executable callbacks.
+
+Restart the Agent/Gateway after changing YAML. Only the Gateway sends WeChat;
+remote Agents expose an authenticated completion poll/ACK API. Synchronous
+prompts initiated from WeChat are suppressed once, preventing a normal reply
+and a second completion bubble for the same turn. Delivery records are written
+before Agent ACK, so an ACK retry does not resend the same WeChat message.
+
+Do not configure `queue_path` and `delivery_path` to the same file. They also
+must not overlap `state_path` or the YAML config file. The implementation
+preserves corrupted JSON files and reports an error instead of silently
+resetting them.
 
 ## Multi-host setup (one WeChat)
 
@@ -290,7 +379,8 @@ npx tsx src/cli.ts start     # daemon (default)
 npx tsx src/cli.ts doctor    # health check
 npx tsx src/cli.ts bind      # print bind code
 npx tsx src/cli.ts unbind
-npx tsx src/cli.ts init      # write example config
+npx tsx src/cli.ts init      # run the first-use setup wizard
+npx tsx src/cli.ts notify-dispatch '<codex-notify-json>' # Codex notify target
 npx tsx src/cli.ts agent-token # generate a 256-bit Agent token
 npx tsx scripts/probe-codex.ts
 ```
@@ -331,7 +421,7 @@ Example: [config.example.yaml](./config.example.yaml).
 
 | Action | Scope |
 |--------|--------|
-| `/cwd` | `allowed_roots`, or `default_cwd` tree if roots unset |
+| `/cwd`, `/projects`, `/project` | `allowed_roots`, or `default_cwd` tree if roots unset |
 | `/get` | **Current session cwd only** (realpath; blocks symlink escape) |
 | Default cwd | `~/code` if unset — **not** `$HOME` |
 
@@ -343,7 +433,10 @@ attachment inbox outside that root.
 
 WeChat-driven threads default to `codex_sandbox_mode: read-only` and
 `codex_approval_policy: on-request`. codex-wechat reapplies these settings when
-starting or resuming a thread. A requested write, command escalation, or extra
+starting or resuming a thread. `/sandbox` and `/approval` can change the
+selected machine's effective global policy; less restrictive changes require a
+second `confirm` command and are persisted for restart. A requested write,
+command escalation, or extra
 permission is sent to WeChat and remains blocked until `/ok <host>:<code>`;
 `/no` and approval timeout deny it. Modern permission grants are limited to the
 requested profile for the current turn.
@@ -369,6 +462,8 @@ src/
   main.ts / cli.ts
   config.ts / state.ts / handler.ts / approvals.ts
   codex/          app-server client
+  completions/    notify dispatcher, persistent outbox and delivery worker
+  hosts/          local/HTTP execution hosts and project selection
   rpc/            JSON-RPC + stdio transport
   wechat/         iLink bot wrapper
 deploy/codex-wechat.service

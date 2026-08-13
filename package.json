@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "tsx src/main.ts",
+    "start": "tsx src/cli.ts",
     "dev": "tsx watch src/main.ts",
     "doctor": "tsx src/cli.ts doctor",
     "typecheck": "tsc -p tsconfig.json --noEmit",

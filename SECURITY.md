@@ -12,6 +12,7 @@ Treat a successful bind like giving that phone access to your development worksp
 - Bind codes are high-entropy (128-bit hex), short-lived (default 5 minutes), and **invalidated after too many failed attempts** (default 5).
 - Dangerous Codex actions surface as WeChat approvals (`/ok` / `/no`); approvals time out to **deny**.
 - WeChat-driven Codex threads explicitly default to `read-only` plus `on-request`; the policy is reapplied on thread start/resume. Modern permission approvals grant only the requested profile for the current turn.
+- The bound user can query and change the selected host's machine-wide policy with `/permissions`, `/sandbox`, and `/approval`. Any change that reduces protection requires a second matching `confirm` command within 60 seconds; the effective policy is persisted across service restarts.
 - **`/get` only sends files under the current session `cwd`** (realpath-checked; no home-wide read).
 - **`/cwd` is limited to `allowed_roots`**, or if unset, only the `default_cwd` tree (never the entire `$HOME` by default).
 - Default workspace is `~/code` when `default_cwd` is not configured — not `$HOME`.
@@ -44,6 +45,7 @@ Include: affected version/commit, reproduction steps, impact, and whether creden
 ## Out of scope / user responsibility
 
 - Misconfiguration (binding a shared phone, always approving dangerous commands).
+- Deliberately confirming `danger-full-access`, `approval=never`, or another less restrictive remote policy.
 - Pointing `default_cwd` / `allowed_roots` at directories that contain secrets.
 - Upstream changes to Tencent iLink or OpenAI Codex app-server protocol.
 - Running the process as root.

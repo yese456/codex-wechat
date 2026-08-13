@@ -22,6 +22,17 @@ it("forwards model operations through authenticated Agent routes", async () => {
         headers: { "Content-Type": "application/json" },
       });
     }
+    if (url.endsWith("/v1/security")) {
+      return new Response(
+        JSON.stringify({
+          policy: {
+            sandboxMode: "workspace-write",
+            approvalPolicy: "on-request",
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
     return new Response(
       JSON.stringify({
         config: {
@@ -53,6 +64,12 @@ it("forwards model operations through authenticated Agent routes", async () => {
     await host.listModels();
     await host.setModel("gpt-b");
     await host.setReasoningEffort("high");
+    assert.equal(
+      (await host.getSecurityPolicy()).sandboxMode,
+      "workspace-write",
+    );
+    await host.setSandboxMode("workspace-write");
+    await host.setApprovalPolicy("on-request");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -64,6 +81,9 @@ it("forwards model operations through authenticated Agent routes", async () => {
       ["/v1/models", "GET"],
       ["/v1/config/write", "POST"],
       ["/v1/config/write", "POST"],
+      ["/v1/security", "GET"],
+      ["/v1/security", "POST"],
+      ["/v1/security", "POST"],
     ],
   );
   assert.deepEqual(JSON.parse(requests[2]!.body!), {
@@ -73,5 +93,11 @@ it("forwards model operations through authenticated Agent routes", async () => {
   assert.deepEqual(JSON.parse(requests[3]!.body!), {
     keyPath: "model_reasoning_effort",
     value: "high",
+  });
+  assert.deepEqual(JSON.parse(requests[5]!.body!), {
+    sandboxMode: "workspace-write",
+  });
+  assert.deepEqual(JSON.parse(requests[6]!.body!), {
+    approvalPolicy: "on-request",
   });
 });

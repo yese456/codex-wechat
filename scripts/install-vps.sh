@@ -93,12 +93,20 @@ CFG_DIR="${XDG_CONFIG_HOME:-$HOME}/.codex-wechat"
 CFG_DIR="$HOME/.codex-wechat"
 mkdir -p "$CFG_DIR"
 if [[ ! -f "$CFG_DIR/config.yaml" ]]; then
-  AGENT_TOKEN="$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")"
-  cat >"$CFG_DIR/config.yaml" <<YAML
+  if [[ -t 0 && -t 1 && "${CODEX_WECHAT_NONINTERACTIVE:-0}" != "1" ]]; then
+    echo "==> running first-use wizard"
+    CODEX_WECHAT_MACHINE="$MACHINE" \
+      node dist/src/cli.js init
+  else
+    AGENT_TOKEN="$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")"
+    cat >"$CFG_DIR/config.yaml" <<YAML
+startup_mode: gateway
 machine_name: ${MACHINE}
 default_cwd: ${CWD_DEFAULT}
-# allowed_roots:
-#   - ${CWD_DEFAULT}
+allowed_roots:
+  - ${CWD_DEFAULT}
+codex_sandbox_mode: read-only
+codex_approval_policy: on-request
 # codex_bin: $(command -v codex)
 approval_timeout_sec: 300
 max_reply_chars: 3500
@@ -110,8 +118,9 @@ agent:
   port: 18765
   token: ${AGENT_TOKEN}
 YAML
-  chmod 600 "$CFG_DIR/config.yaml"
-  echo "==> wrote $CFG_DIR/config.yaml"
+    chmod 600 "$CFG_DIR/config.yaml"
+    echo "==> wrote $CFG_DIR/config.yaml (non-interactive safe defaults)"
+  fi
 else
   echo "==> keep existing $CFG_DIR/config.yaml"
 fi
@@ -134,10 +143,9 @@ Type=simple
 WorkingDirectory=${INSTALL_DIR}
 Environment=PATH=${PATH_EXTRA}
 Environment=CODEX_WECHAT_MACHINE=${MACHINE}
-Environment=CODEX_WECHAT_CWD=${CWD_DEFAULT}
 Environment=HOME=${HOME}
 # Environment=CODEX_HOME=${HOME}/.codex
-ExecStart=${NODE_BIN} ${INSTALL_DIR}/dist/src/cli.js start
+ExecStart=${NODE_BIN} ${INSTALL_DIR}/dist/src/cli.js
 Restart=on-failure
 RestartSec=5
 
@@ -158,12 +166,12 @@ if need_cmd systemctl; then
   echo ""
   echo "==> Next steps on this VPS:"
   echo "   1) codex login          # MUST succeed before start"
-  echo "   2) systemctl --user start codex-wechat"
-  echo "   3) journalctl --user -u codex-wechat -f   # scan QR URL"
-  echo "   4) npx tsx src/cli.ts bind               # then /bind <code> in WeChat"
+  echo "   2) systemctl --user start codex-wechat  # 按 startup_mode 启动"
+  echo "   3) journalctl --user -u codex-wechat -f"
+  echo "   4) Host / Gateway 模式再执行 npx tsx src/cli.ts bind"
 else
   echo "==> No systemctl — start manually:"
-  echo "   cd $INSTALL_DIR && npx tsx src/cli.ts start"
+  echo "   cd $INSTALL_DIR && npx tsx src/cli.ts"
 fi
 
 echo "Done."
