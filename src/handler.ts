@@ -45,8 +45,14 @@ const HELP = `codex-wechat 命令
 同一微信请只在一台机器扫 iLink（入口）。多机执行用 /m 切换。
 普通文本/图片/文件发给当前 host 的 Codex。`;
 
+type QueuedHostTask = {
+  reply: ReplyChannel;
+  action: () => Promise<void>;
+};
+
 export class MessageHandler {
   private readonly busyHosts = new Set<string>();
+  private readonly hostQueues = new Map<string, QueuedHostTask[]>();
   private readonly securityConfirmations = new Map<
     string,
     { value: string; expiresAt: number }
@@ -638,16 +644,48 @@ export class MessageHandler {
     action: () => Promise<void>,
   ): Promise<void> {
     if (this.busyHosts.has(host.id)) {
-      await reply.text(`host=${host.id} 上一任务还在进行中，请稍候`);
+      const queue = this.hostQueues.get(host.id) ?? [];
+      queue.push({ reply, action });
+      this.hostQueues.set(host.id, queue);
+      await reply.text(
+        `host=${host.id} 上一任务还在进行中，已加入队列（等待第 ${queue.length} 项）`,
+      );
       return;
     }
     this.busyHosts.add(host.id);
+    await this.executeExclusive(host, { reply, action }, false);
+  }
+
+  private async executeExclusive(
+    host: CodexHost,
+    task: QueuedHostTask,
+    wasQueued: boolean,
+  ): Promise<void> {
     try {
-      await action();
+      if (wasQueued) {
+        const remaining = this.hostQueues.get(host.id)?.length ?? 0;
+        await task.reply.text(
+          `host=${host.id} 上一任务已完成，开始处理排队任务（后面还有 ${remaining} 项）`,
+        );
+      }
+      await task.action();
     } catch (err) {
-      await reply.text(`❌ ${(err as Error).message}`);
+      await task.reply.text(`❌ ${(err as Error).message}`);
     } finally {
-      this.busyHosts.delete(host.id);
+      const queue = this.hostQueues.get(host.id);
+      const next = queue?.shift();
+      if (!queue || queue.length === 0) this.hostQueues.delete(host.id);
+
+      if (next) {
+        // Keep the host marked busy while ownership passes to the next task.
+        // Do not make the original inbound message wait for the whole queue.
+        void this.executeExclusive(host, next, true).catch((error) => {
+          this.busyHosts.delete(host.id);
+          console.error(`[queue] host=${host.id} drain failed:`, error);
+        });
+      } else {
+        this.busyHosts.delete(host.id);
+      }
     }
   }
 

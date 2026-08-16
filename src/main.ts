@@ -150,7 +150,7 @@ export async function runDaemon(): Promise<void> {
   );
 
   let shuttingDown = false;
-  const shutdown = async (signal: string) => {
+  const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n收到 ${signal}，正在退出…`);
@@ -159,11 +159,24 @@ export async function runDaemon(): Promise<void> {
     await codex.close().catch(() => {});
     try {
       wechat.bot.stop();
+      await wechat.runPromise.catch(() => {});
     } catch {
       // ignore
     }
-    process.exit(0);
+    process.exit(exitCode);
   };
+  void wechat.runPromise.then(
+    () => {
+      if (shuttingDown) return;
+      console.error("[wechat] 长轮询意外停止且未返回错误");
+      void shutdown("WECHAT_POLL_STOPPED", 1);
+    },
+    (error) => {
+      if (shuttingDown) return;
+      console.error("[wechat] 长轮询意外停止:", error);
+      void shutdown("WECHAT_POLL_STOPPED", 1);
+    },
+  );
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }

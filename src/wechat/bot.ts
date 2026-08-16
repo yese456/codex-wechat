@@ -6,6 +6,8 @@ import type { ReplyChannel } from "../media/types.js";
 
 export type WechatRuntime = {
   bot: WeChatBot;
+  /** Long-poll loop; resolves only after stop or a fatal polling failure. */
+  runPromise: Promise<void>;
   /** Last peer we can push notifications to (approvals). */
   lastUserId: string | null;
   sendToUser: (userId: string, text: string) => Promise<void>;
@@ -30,6 +32,34 @@ function makeReplyChannel(
       await bot.reply(msg, { file: buf, fileName });
     },
   };
+}
+
+export async function startWechatPolling(
+  bot: WeChatBot,
+): Promise<{ runPromise: Promise<void> }> {
+  const runPromise = bot.start();
+  await new Promise<void>((resolve, reject) => {
+    const onStarted = () => {
+      cleanup();
+      resolve();
+    };
+    const onStopped = () => {
+      cleanup();
+      reject(new Error("微信长轮询在启动完成前停止"));
+    };
+    const cleanup = () => {
+      bot.off("poll:start", onStarted);
+      bot.off("poll:stop", onStopped);
+    };
+    bot.on("poll:start", onStarted);
+    bot.on("poll:stop", onStopped);
+    if (bot.isRunning) onStarted();
+    void runPromise.catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+  return { runPromise };
 }
 
 export async function startWechatBot(opts: {
@@ -195,11 +225,12 @@ export async function startWechatBot(opts: {
     }
   }
 
-  await bot.start();
+  const { runPromise } = await startWechatPolling(bot);
   console.log("微信长轮询已启动（支持文本 / 图片 / 文件）");
 
   return {
     bot,
+    runPromise,
     get lastUserId() {
       return lastUserId;
     },

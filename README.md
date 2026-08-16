@@ -141,8 +141,8 @@ Approvals look like:
 | `/sandbox [mode]` | Show or switch the current host's machine-wide sandbox mode |
 | `/approval [policy]` | Show or switch the current host's machine-wide approval policy |
 | `/hosts` | List execution hosts |
-| `/m <id>` | Switch host (`/m local`, `/m vps`) |
-| plain text | Sent to the **current** host’s Codex |
+| `/m <id>` | Switch host using an exact ID from `/hosts` (for example, `/m local` or `/m mac`) |
+| plain text | Sent to the **current** host’s Codex; busy hosts queue requests in FIFO order |
 | **image** | Downloaded → `localImage` for Codex |
 | **file / video** | Saved under `{cwd}/.codex-wechat-inbox/`；路径写入 prompt 供 Codex 读取 |
 
@@ -266,14 +266,55 @@ Reachability options:
 
 - **Tailscale / WireGuard** between gateway and agents (set both sides' `allow_insecure_http: true`)
 - **SSH tunnel** on gateway: `ssh -N -L 18766:127.0.0.1:18765 user@agent-host`
+- **Reverse SSH tunnel** from a Mac/agent to the gateway:
+  `ssh -NT -R 127.0.0.1:18765:127.0.0.1:18765 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 user@gateway`
 - Do **not** expose agent port to the open internet without TLS + strong token
+
+Run a long-lived reverse tunnel under `launchd` or `autossh` so it restarts
+after Mac sleep, a network change, or a dead SSH session. Verify it from the
+gateway in three layers:
+
+```bash
+# 1. The SSH listener exists.
+ss -ltnp | rg 18765
+
+# 2. The tunnel reaches a running Agent.
+curl -fsS --max-time 5 http://127.0.0.1:18765/health
+```
+
+Then verify the configured token and Codex app-server in WeChat:
+
+```text
+/m mac
+/status
+```
+
+`ECONNREFUSED` means the tunnel listener is absent. A listener with a failing
+`/health` means the tunnel cannot reach the Agent. A successful `/health` but
+failing `/status` points to gateway token/configuration or the Agent's Codex
+app-server.
+
+A listening port can still be a half-dead tunnel. If WeChat remains at
+`Codex 处理中…`, `/health` times out, and `ss -tanp | rg 18765` shows many
+`CLOSE-WAIT` or `FIN-WAIT-2` sockets, the request is not evidence that Codex is
+still computing. The gateway waits up to `CODEX_WECHAT_PROMPT_TIMEOUT_MS`
+(default: 900000 ms), so the visible failure may be delayed for 15 minutes.
+
+Recover in this order:
+
+1. Send `/m local` so new requests use the gateway while Mac is unavailable.
+2. On the Mac, call `curl -fsS --max-time 5 http://127.0.0.1:18765/health`.
+3. If the Mac-local check fails, restart the Agent. If it succeeds, restart
+   only the reverse SSH tunnel.
+4. Repeat the gateway `/health` and WeChat `/status` checks, then resend the
+   original task. An already-hung remote prompt does not recover its response.
 
 ### 2. On the gateway (WeChat entry)
 
 ```yaml
 # ~/.codex-wechat/config.yaml
 machine_name: gateway-vps
-default_host: local   # or vps
+default_host: local   # must match an id under hosts
 
 hosts:
   - id: local
@@ -302,6 +343,13 @@ In WeChat:
 hello from phone
 /m local
 ```
+
+`machine_name` is only the display name shown by `/status`; it is not
+automatically a host ID. If `/m <name>` reports `未知 host`, run `/hosts` and
+use one of the exact IDs listed there. The selected host is persisted in
+`state.json`, so it can remain `mac` after a restart even when
+`default_host: local`; switch back with `/m local` when the Mac Agent or its
+tunnel is offline.
 
 ### 3. What not to do
 
@@ -366,6 +414,21 @@ Use different `machine_name` (`mac-mini` vs `vps`) so `/status` and `/usage` are
 
 Template: [deploy/codex-wechat.service](./deploy/codex-wechat.service).
 
+When deploying from a Mac with `scripts/deploy-from-mac.sh`, the script mirrors
+the repository into `REMOTE_DIR` (default: `$HOME/apps/codex-wechat`) using
+`rsync --delete`. This overwrites or removes VPS-only changes inside that
+project directory. Runtime data is separate: the script does not sync
+`$HOME/.codex-wechat/`, and `install-vps.sh` preserves an existing
+`config.yaml`, so `config.yaml`, `state.json`, and WeChat credentials survive a
+code deployment. Never set `REMOTE_DIR` to `$HOME` or `$HOME/.codex-wechat`.
+
+There is no bundled VPS-to-Mac sync script. Prefer Git for that direction. If
+you use `rsync --delete` manually, target only the Mac project directory and
+exclude `config.yaml`, `config.local.yaml`, `*.local.yaml`, `state.json`, and
+`.codex-wechat/`. Otherwise rsync can overwrite/delete a project-local config;
+if it creates one, that file also takes precedence over the Mac user's
+`~/.codex-wechat/config.yaml`.
+
 ```bash
 export CODEX_WECHAT_MACHINE=vps
 export CODEX_WECHAT_CWD=/home/you/app
@@ -387,7 +450,9 @@ npx tsx scripts/probe-codex.ts
 
 ## Configuration
 
-Priority: **environment variables > `config.yaml` > defaults**.
+Config-file priority is **`CODEX_WECHAT_CONFIG` > project `config.yaml` >
+project `config.local.yaml` > `~/.codex-wechat/config.yaml` > defaults**.
+Individual environment variables override the values loaded from that file.
 
 | Variable | Meaning |
 |----------|---------|
