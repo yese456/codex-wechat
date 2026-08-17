@@ -1,8 +1,10 @@
 # codex-wechat
 
-[![CI](https://github.com/YOUR_USER/codex-wechat/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USER/codex-wechat/actions/workflows/ci.yml)
+[![CI](https://github.com/yese456/codex-wechat/actions/workflows/ci.yml/badge.svg)](https://github.com/yese456/codex-wechat/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
+
+[中文介绍](./README.zh-CN.md) · English
 
 **WeChat remote control for Codex** on your own machine or VPS.
 
@@ -77,7 +79,7 @@ Phone (WeChat)  ──扫码仅一次──►  gateway (VPS, always on)
 ## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USER/codex-wechat.git
+git clone https://github.com/yese456/codex-wechat.git
 cd codex-wechat
 npm install
 npm run typecheck
